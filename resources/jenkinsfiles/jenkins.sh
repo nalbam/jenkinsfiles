@@ -18,6 +18,8 @@
 #       Log in to REGISTRY (Harbor or Amazon ECR), build and push
 #       REGISTRY/NAME:VERSION for PLATFORMS (default linux/amd64,linux/arm64),
 #       and REGISTRY/NAME:latest when LATEST is true. Logs out at exit.
+#       When REGISTRY/NAME:VERSION exists, it is not pushed again, so a re-run
+#       works with Harbor tag immutability; only latest is updated.
 #       Env: REGISTRY_USER and REGISTRY_PASSWORD for Harbor; AWS credentials for ECR.
 
 set -euo pipefail
@@ -72,11 +74,14 @@ cmd_sonar() {
         for archive in artifact/*.jar artifact/*.war; do
           [ -f "$archive" ] && (cd classes && jar xf "../$archive")
         done
-        binaries="$(find classes -type d \( -path "*/BOOT-INF/classes" -o -path "*/WEB-INF/classes" \) | paste -sd, -)"
-        [ -n "$binaries" ] || { echo "error: no classes in the artifact" >&2; exit 1; }
-        args+=("-Dsonar.java.binaries=$binaries")
-        libraries="$(find classes -name "*.jar" -path "*/lib/*" | paste -sd, -)"
-        [ -z "$libraries" ] || args+=("-Dsonar.java.libraries=$libraries")
+        # The scanner image has no find; use bash globs. The paths are absolute,
+        # because the scanner runs in src and resolves relative paths from there.
+        shopt -s globstar nullglob
+        binaries=("$PWD"/classes/**/BOOT-INF/classes/ "$PWD"/classes/**/WEB-INF/classes/)
+        [ ${#binaries[@]} -gt 0 ] || { echo "error: no classes in the artifact" >&2; exit 1; }
+        args+=("-Dsonar.java.binaries=$(IFS=,; echo "${binaries[*]%/}")")
+        libraries=("$PWD"/classes/**/lib/*.jar)
+        [ ${#libraries[@]} -eq 0 ] || args+=("-Dsonar.java.libraries=$(IFS=,; echo "${libraries[*]}")")
       fi
       cd src
       sonar-scanner \
@@ -86,6 +91,7 @@ cmd_sonar() {
         -Dsonar.sources=. \
         -Dsonar.exclusions="**/node_modules/**,**/dist/**,**/target/**,**/*_pb2*.py" \
         -Dsonar.qualitygate.wait=true \
+        -Dsonar.scm.disabled=true \
         -Dsonar.working.directory=/tmp/scannerwork \
         ${args[@]+"${args[@]}"}
     ' < "$work/scan.tar"
@@ -120,7 +126,9 @@ cmd_image() {
   [[ "$latest" == true || "$latest" == false ]] || die "LATEST must be true or false"
 
   # Log out at exit, so the credential does not stay on a shared agent.
-  trap 'docker logout "$host" > /dev/null' EXIT
+  # A global, because the EXIT trap runs after the locals of this function are gone.
+  LOGOUT_HOST="$host"
+  trap 'docker logout "$LOGOUT_HOST" > /dev/null || true' EXIT
   if [[ "$host" =~ ^[0-9]{12}\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com$ ]]; then
     local region="${BASH_REMATCH[1]}"
     local repository="${image#"$host"/}"
@@ -135,6 +143,15 @@ cmd_image() {
     : "${REGISTRY_USER:?REGISTRY_USER is required for $host}"
     : "${REGISTRY_PASSWORD:?REGISTRY_PASSWORD is required for $host}"
     printf '%s' "$REGISTRY_PASSWORD" | docker login --username "$REGISTRY_USER" --password-stdin "$host"
+  fi
+
+  if docker buildx imagetools inspect "$image:$version" > /dev/null 2>&1; then
+    echo "$image:$version exists; not pushed again"
+    if [ "$latest" = true ]; then
+      docker buildx imagetools create --tag "$image:latest" "$image:$version"
+      echo "moved $image:latest to $version"
+    fi
+    return 0
   fi
 
   local tags=(--tag "$image:$version")
