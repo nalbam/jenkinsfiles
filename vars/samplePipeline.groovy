@@ -151,6 +151,7 @@ def call(Map config = [:]) {
       stage('Deploy prod') {
         agent any
         when {
+          beforeAgent true
           buildingTag()
           expression { env.REGISTRY && env.GITOPS_REPO && env.PRERELEASE == 'false' }
         }

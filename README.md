@@ -29,7 +29,7 @@ The stages and the GitHub Actions path are in `docs/pipeline.md` of each sample 
 | Artifact | always | `dist/<repo>-<version>.tar.gz` and `.sha256`, archived in Jenkins. |
 | SonarQube | `SONAR_HOST_URL` is set, on `main` and tags | Analyzes project `<repo>` and waits for the quality gate. A failed gate fails the build. |
 | Nexus | `NEXUS_URL` is set, on tags | Uploads the artifact. Skips the upload when Nexus already has the same sha256, so a tag build can run again. |
-| Image | `REGISTRY` is set, on tags | Pushes `<REGISTRY>/<repo>:<version>`, and `latest` for the highest stable tag. Logs out of the registry at the end. |
+| Image | `REGISTRY` is set, on tags | Pushes `<REGISTRY>/<repo>:<version>`, and `latest` for the highest stable tag. A re-run does not push an existing version again, so Harbor tag immutability works. Logs out of the registry at the end. |
 | Deploy alpha | `REGISTRY` and `GITOPS_REPO` are set, on tags | Sends the GitOps event for phase `alpha`. |
 | Approve prod | as Deploy alpha, stable tags only | Waits up to 7 days for an approval. It holds no executor. |
 | Deploy prod | after the approval | Sends phase `prod` with `auto_merge: true`. |
@@ -46,8 +46,9 @@ The build stages share one executor with a 60-minute timeout.
    - Default version: `main`, or a tag of this repository to pin it.
    - Retrieval method: Modern SCM, Git, `https://github.com/nalbam/jenkinsfiles.git`.
 3. Create a **Multibranch Pipeline** job for each repository with the GitHub or Git branch source:
-   - Behaviours: **Discover branches** and **Discover tags**. Also add the clone behaviour that fetches tags.
-     The `Prepare` stage needs all release tags to decide whether a tag moves `latest`, and fails when the tag is missing.
+   - Behaviours: **Discover branches** and **Discover tags**. With **Discover tags**, the checkout fetches all tags.
+     The `Prepare` stage needs them to decide whether a tag moves `latest`, and fails when the tag is missing.
+     Do not add a clone behaviour that disables tags.
    - Build strategies: **Regular branches** and **Tags**. Leave the tag age limits empty, or longer than
      the time between a commit and its tag. Jenkins discovers older tags but does not build them.
 4. Set the environment variables and the credentials below.
@@ -94,8 +95,10 @@ Set them as global or folder properties.
 
 ## Notes
 
-- SonarQube: the scanner runs in Docker and reads the sources from stdin, so it needs no bind mount and works
-  on an agent that uses the host Docker daemon. The SonarQube URL must be reachable from a container.
+- SonarQube: the scanner runs in Docker and reads the tracked files of `HEAD` from stdin, so it needs no bind mount
+  and works on an agent that uses the host Docker daemon. `SONAR_HOST_URL` must be reachable from the default
+  bridge network of that daemon. The scanner image is `linux/amd64` only and runs emulated on arm64 agents.
+  The sources have no `.git`, so the analysis has no blame data (`sonar.scm.disabled=true`).
   The Community Build keeps one branch per project, so the pipeline analyzes `main` and tags only.
   Java projects send the classes from the release jar or war.
 - Nexus 3 Community Edition rejects every upload with HTTP 403 until an administrator accepts the EULA.
@@ -108,4 +111,5 @@ Set them as global or folder properties.
 shellcheck resources/jenkinsfiles/jenkins.sh
 ```
 
-Validate the pipeline syntax with the Jenkins declarative linter of a Jenkins instance that has the library.
+The Jenkins declarative linter does not load `@Library`. To check the syntax, send the `pipeline { ... }` block of
+`vars/samplePipeline.groovy` to `<JENKINS_URL>/pipeline-model-converter/validate`.
