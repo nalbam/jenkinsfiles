@@ -134,7 +134,10 @@ cmd_image() {
     local repository="${image#"$host"/}"
     aws ecr get-login-password --region "$region" |
       docker login --username AWS --password-stdin "$host"
-    if ! aws ecr describe-repositories --region "$region" --repository-names "$repository" > /dev/null 2>&1; then
+    # Create the repository only when it is missing; stop on any other lookup error.
+    local lookup
+    if ! lookup="$(aws ecr describe-repositories --region "$region" --repository-names "$repository" 2>&1)"; then
+      grep -q RepositoryNotFoundException <<< "$lookup" || die "ECR lookup of $repository failed: $lookup"
       aws ecr create-repository --region "$region" --repository-name "$repository" \
         --image-scanning-configuration scanOnPush=true > /dev/null
       echo "created ECR repository $repository"
